@@ -1,0 +1,66 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --brand-green: #002815;
+    --brand-gold: #FEBD12;
+    --surface-sage: #F3F5F2;
+    --text-charcoal: #111827;
+    --text-slate: #4B5563;
+  }
+
+  html {
+    scroll-behavior: smooth;
+    font-family: 'Poppins', -apple-system, BlinkMacSystemFont, sans-serif;
+  }
+
+  h1, h2, h3, h4, h5, h6, .font-heading {
+    font-family: 'Montserrat', -apple-system, BlinkMacSystemFont, sans-serif;
+  }
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+@keyframes cursorBlink {
+  0%, 49% {
+    opacity: 1;
+  }
+  50%, 100% {
+    opacity: 0;
+  }
+}
+
+.animate-cursor-blink {
+  animation: cursorBlink 0.9s infinite;
+}
+
+@keyframes subtlePulseRing {
+  0% {
+    transform: scale(1);
+    opacity: 0.45;
+  }
+  70% {
+    transform: scale(1.28);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(1.28);
+    opacity: 0;
+  }
+}
+
+.whatsapp-pulse-ring {
+  animation: subtlePulseRing 2.6s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  .animate-cursor-blink,
+  .whatsapp-pulse-ring {
+    animation: none;
+  }
+}
