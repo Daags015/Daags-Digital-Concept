@@ -19,6 +19,7 @@ export const ServicesPricingTab: React.FC = () => {
   const [editingSub, setEditingSub] = useState<SubService | null>(null);
   const [editingCat, setEditingCat] = useState<ServiceCategory | null>(null);
   const [pendingDelete, setPendingDelete] = useState<DeleteTarget | null>(null);
+  const [saving, setSaving] = useState(false);
 
   const sortedCategories = [...db.service_categories].sort(
     (a, b) => a.display_order - b.display_order
@@ -60,31 +61,53 @@ export const ServicesPricingTab: React.FC = () => {
     });
   };
 
-  const saveSub = (e: React.FormEvent) => {
+  const saveSub = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editingSub) return;
+    if (!editingSub || saving) return;
     if (!editingSub.title.trim()) {
       showToast('Please enter a service title.', 'error');
       return;
     }
-    upsertSubService({
+    setSaving(true);
+    const res = await upsertSubService({
       ...editingSub,
+      title: editingSub.title.trim(),
       slug: editingSub.slug.trim() || slugify(editingSub.title),
+      original_price: Number(editingSub.original_price) || 0,
+      ongoing_price: Number(editingSub.ongoing_price) || 0,
       deliverables: editingSub.deliverables.filter((d) => d.trim().length > 0),
     });
-    showToast(`Saved "${editingSub.title}" with live dual pricing.`, 'success');
-    setEditingSub(null);
+    setSaving(false);
+    if (res.ok) {
+      showToast(
+        res.synced
+          ? `Saved "${editingSub.title}" and synced live to Supabase.`
+          : `Saved "${editingSub.title}" locally in this browser.`,
+        'success'
+      );
+      setEditingSub(null);
+    }
   };
 
-  const saveCat = (e: React.FormEvent) => {
+  const saveCat = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editingCat || !editingCat.name.trim()) return;
-    upsertCategory({
+    if (!editingCat || !editingCat.name.trim() || saving) return;
+    setSaving(true);
+    const res = await upsertCategory({
       ...editingCat,
+      name: editingCat.name.trim(),
       slug: editingCat.slug.trim() || slugify(editingCat.name),
     });
-    showToast(`Category "${editingCat.name}" saved.`, 'success');
-    setEditingCat(null);
+    setSaving(false);
+    if (res.ok) {
+      showToast(
+        res.synced
+          ? `Category "${editingCat.name}" saved and synced live.`
+          : `Category "${editingCat.name}" saved locally.`,
+        'success'
+      );
+      setEditingCat(null);
+    }
   };
 
   return (
@@ -345,10 +368,11 @@ export const ServicesPricingTab: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-md bg-[#002815] text-white text-xs font-semibold cursor-pointer"
+                  disabled={saving}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-md bg-[#002815] text-white text-xs font-semibold disabled:opacity-60 cursor-pointer"
                 >
                   <Save className="w-3.5 h-3.5 text-[#FEBD12]" />
-                  Save Category
+                  {saving ? 'Saving...' : 'Save Category'}
                 </button>
               </div>
             </div>
@@ -411,13 +435,16 @@ export const ServicesPricingTab: React.FC = () => {
                   <input
                     type="number"
                     min={0}
-                    value={editingSub.original_price}
-                    onChange={(e) =>
+                    step={100}
+                    placeholder="0"
+                    value={editingSub.original_price === 0 ? '' : editingSub.original_price}
+                    onChange={(e) => {
+                      const raw = e.target.value;
                       setEditingSub({
                         ...editingSub,
-                        original_price: Number(e.target.value) || 0,
-                      })
-                    }
+                        original_price: raw === '' ? 0 : Math.max(0, Number(raw) || 0),
+                      });
+                    }}
                     className="w-full px-3 py-2 text-sm rounded-md border border-neutral-300 bg-white tabular-nums"
                   />
                 </div>
@@ -426,13 +453,16 @@ export const ServicesPricingTab: React.FC = () => {
                   <input
                     type="number"
                     min={0}
-                    value={editingSub.ongoing_price}
-                    onChange={(e) =>
+                    step={100}
+                    placeholder="0"
+                    value={editingSub.ongoing_price === 0 ? '' : editingSub.ongoing_price}
+                    onChange={(e) => {
+                      const raw = e.target.value;
                       setEditingSub({
                         ...editingSub,
-                        ongoing_price: Number(e.target.value) || 0,
-                      })
-                    }
+                        ongoing_price: raw === '' ? 0 : Math.max(0, Number(raw) || 0),
+                      });
+                    }}
                     className="w-full px-3 py-2 text-sm rounded-md border border-neutral-300 bg-white tabular-nums font-bold text-[#002815]"
                   />
                 </div>
@@ -547,10 +577,11 @@ export const ServicesPricingTab: React.FC = () => {
               </button>
               <button
                 type="submit"
-                className="inline-flex items-center gap-1.5 px-5 py-2 rounded-md bg-[#002815] text-white text-xs font-semibold hover:bg-[#003d20] cursor-pointer"
+                disabled={saving}
+                className="inline-flex items-center gap-1.5 px-5 py-2 rounded-md bg-[#002815] text-white text-xs font-semibold hover:bg-[#003d20] disabled:opacity-60 cursor-pointer"
               >
                 <Save className="w-3.5 h-3.5 text-[#FEBD12]" />
-                <span>Save Service & Pricing</span>
+                <span>{saving ? 'Saving...' : 'Save Service & Pricing'}</span>
               </button>
             </div>
           </form>
@@ -567,16 +598,31 @@ export const ServicesPricingTab: React.FC = () => {
             : 'This sub-service will be permanently removed from your services catalog.'
         }
         onCancel={() => setPendingDelete(null)}
-        onConfirm={() => {
+        onConfirm={async () => {
           if (!pendingDelete) return;
-          if (pendingDelete.kind === 'category') {
-            deleteCategory(pendingDelete.id);
-            showToast(`Category "${pendingDelete.name}" deleted.`, 'info');
-          } else {
-            deleteSubService(pendingDelete.id);
-            showToast(`Sub-service "${pendingDelete.name}" deleted.`, 'info');
-          }
+          const target = pendingDelete;
           setPendingDelete(null);
+          if (target.kind === 'category') {
+            const res = await deleteCategory(target.id);
+            if (res.ok) {
+              showToast(
+                res.synced
+                  ? `Category "${target.name}" permanently deleted from live site.`
+                  : `Category "${target.name}" deleted locally.`,
+                'info'
+              );
+            }
+          } else {
+            const res = await deleteSubService(target.id);
+            if (res.ok) {
+              showToast(
+                res.synced
+                  ? `Sub-service "${target.name}" permanently deleted from live site.`
+                  : `Sub-service "${target.name}" deleted locally.`,
+                'info'
+              );
+            }
+          }
         }}
       />
     </div>

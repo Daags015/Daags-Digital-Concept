@@ -1,4 +1,4 @@
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AdminPermissions,
   AdminUser,
@@ -30,6 +30,12 @@ export interface InquiryModalPreset {
   subService?: string;
 }
 
+export interface CmsMutationResult {
+  ok: boolean;
+  synced: boolean;
+  error?: string;
+}
+
 interface CmsContextValue {
   db: CmsDatabase;
   currentAdmin: AdminUser | null;
@@ -37,16 +43,17 @@ interface CmsContextValue {
   supabaseAuthEmail: string | null;
   lastSyncError: string | null;
   syncLocalToSupabase: () => Promise<{ ok: boolean; message: string }>;
+  refreshFromSupabase: () => Promise<void>;
   inquiryModal: InquiryModalPreset;
   openInquiryModal: (preset?: { serviceCategory?: string; subService?: string }) => void;
   closeInquiryModal: () => void;
   getSection: (id: string) => PageSection;
   updateSiteSettings: (settings: SiteSettings) => void;
   updatePageSection: (section: PageSection) => void;
-  upsertCategory: (category: ServiceCategory) => void;
-  deleteCategory: (categoryId: string) => void;
-  upsertSubService: (sub: SubService) => void;
-  deleteSubService: (subId: string) => void;
+  upsertCategory: (category: ServiceCategory) => Promise<CmsMutationResult>;
+  deleteCategory: (categoryId: string) => Promise<CmsMutationResult>;
+  upsertSubService: (sub: SubService) => Promise<CmsMutationResult>;
+  deleteSubService: (subId: string) => Promise<CmsMutationResult>;
   upsertPortfolioProject: (project: PortfolioProject) => void;
   deletePortfolioProject: (projectId: string) => void;
   upsertFaq: (faq: FaqItem) => void;
@@ -102,17 +109,27 @@ function loadStoredDatabase(): CmsDatabase {
         : INITIAL_CMS_SEED.site_settings.business_schedule,
     };
 
+    const storedSubServices = Array.isArray(parsed.sub_services)
+      ? parsed.sub_services.map((s) => ({
+          ...s,
+          original_price: Number(s.original_price) || 0,
+          ongoing_price: Number(s.ongoing_price) || 0,
+          display_order: Number(s.display_order) || 1,
+          deliverables: Array.isArray(s.deliverables) ? s.deliverables : [],
+        }))
+      : INITIAL_CMS_SEED.sub_services;
+
     return {
       site_settings: mergedSiteSettings,
       page_sections: mergedSections,
-      service_categories: parsed.service_categories?.length
+      service_categories: Array.isArray(parsed.service_categories)
         ? parsed.service_categories
         : INITIAL_CMS_SEED.service_categories,
-      sub_services: parsed.sub_services?.length ? parsed.sub_services : INITIAL_CMS_SEED.sub_services,
-      portfolio_projects: parsed.portfolio_projects?.length
+      sub_services: storedSubServices,
+      portfolio_projects: Array.isArray(parsed.portfolio_projects)
         ? parsed.portfolio_projects
         : INITIAL_CMS_SEED.portfolio_projects,
-      faqs: parsed.faqs?.length ? parsed.faqs : INITIAL_CMS_SEED.faqs,
+      faqs: Array.isArray(parsed.faqs) ? parsed.faqs : INITIAL_CMS_SEED.faqs,
       inquiries: Array.isArray(parsed.inquiries) ? parsed.inquiries : INITIAL_CMS_SEED.inquiries,
       admin_users: parsed.admin_users?.length ? parsed.admin_users : INITIAL_CMS_SEED.admin_users,
     };
@@ -124,6 +141,8 @@ function loadStoredDatabase(): CmsDatabase {
 export const CmsProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { showToast } = useToast();
   const [db, setDb] = useState<CmsDatabase>(() => loadStoredDatabase());
+  const dbRef = useRef<CmsDatabase>(db);
+  dbRef.current = db;
   const [adminId, setAdminId] = useState<string | null>(() => {
     try {
       return window.localStorage.getItem(SESSION_KEY);
@@ -226,28 +245,56 @@ export const CmsProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           }
         }
 
-        const mergedSubServices = subs.data?.length
-          ? (subs.data as SubService[]).map((remoteSub) => {
-              if (remoteSub.image_url) return remoteSub;
-              const fallback = INITIAL_CMS_SEED.sub_services.find(
-                (seedSub) => seedSub.slug === remoteSub.slug
-              );
-              return fallback ? { ...remoteSub, image_url: fallback.image_url } : remoteSub;
-            })
-          : prev.sub_services;
+        const remoteCategories: ServiceCategory[] =
+          !cats.error && Array.isArray(cats.data)
+            ? (cats.data as ServiceCategory[]).map((cat) => ({
+                ...cat,
+                display_order: Number(cat.display_order) || 1,
+                is_published: Boolean(cat.is_published),
+              }))
+            : prev.service_categories;
+
+        const validCategoryIds = new Set(remoteCategories.map((c) => c.id));
+
+        const mergedSubServices: SubService[] =
+          !subs.error && Array.isArray(subs.data)
+            ? (subs.data as SubService[])
+                .filter((remoteSub) =>
+                  validCategoryIds.size === 0 ? true : validCategoryIds.has(remoteSub.category_id)
+                )
+                .map((remoteSub) => {
+                  const fallback = INITIAL_CMS_SEED.sub_services.find(
+                    (seedSub) => seedSub.slug === remoteSub.slug
+                  );
+                  return {
+                    ...remoteSub,
+                    original_price: Number(remoteSub.original_price) || 0,
+                    ongoing_price: Number(remoteSub.ongoing_price) || 0,
+                    display_order: Number(remoteSub.display_order) || 1,
+                    is_published: Boolean(remoteSub.is_published),
+                    is_placeholder_price: Boolean(remoteSub.is_placeholder_price),
+                    deliverables: Array.isArray(remoteSub.deliverables)
+                      ? remoteSub.deliverables
+                      : [],
+                    image_url: remoteSub.image_url || fallback?.image_url || '',
+                  };
+                })
+            : prev.sub_services;
 
         return {
           ...prev,
           site_settings: mergedSiteSettings,
           page_sections: mergedSections,
-          service_categories: cats.data?.length
-            ? (cats.data as ServiceCategory[])
-            : prev.service_categories,
+          service_categories: remoteCategories,
           sub_services: mergedSubServices,
-          portfolio_projects: ports.data?.length
-            ? (ports.data as PortfolioProject[])
-            : prev.portfolio_projects,
-          faqs: faqs.data?.length ? (faqs.data as FaqItem[]) : prev.faqs,
+          portfolio_projects:
+            !ports.error && Array.isArray(ports.data)
+              ? (ports.data as PortfolioProject[])
+              : prev.portfolio_projects,
+          faqs:
+            !faqs.error && Array.isArray(faqs.data)
+              ? (faqs.data as FaqItem[])
+              : prev.faqs,
           inquiries: inquiriesRes.data?.length
             ? (inquiriesRes.data as Inquiry[])
             : prev.inquiries,
@@ -261,11 +308,31 @@ export const CmsProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   }, []);
 
-  // Supabase hydration & auth session listener
+  const refreshFromSupabase = useCallback(async () => {
+    await hydrateFromSupabase();
+  }, [hydrateFromSupabase]);
+
+  // Supabase hydration, auth session listener, cross-tab storage sync, and tab-focus refresh
   useEffect(() => {
     const activeRef = { current: true };
     hydrateFromSupabase(activeRef);
 
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key === STORAGE_KEY) {
+        setDb(loadStoredDatabase());
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        hydrateFromSupabase(activeRef);
+      }
+    };
+
+    window.addEventListener('storage', handleStorage);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    let unsubscribeAuth: (() => void) | undefined;
     if (isSupabaseConfigured && supabase) {
       supabase.auth
         .getSession()
@@ -278,16 +345,19 @@ export const CmsProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
         if (activeRef.current) {
           setSupabaseAuthEmail(session?.user?.email || null);
+          if (session) {
+            hydrateFromSupabase(activeRef);
+          }
         }
       });
-      return () => {
-        activeRef.current = false;
-        listener.subscription.unsubscribe();
-      };
+      unsubscribeAuth = () => listener.subscription.unsubscribe();
     }
 
     return () => {
       activeRef.current = false;
+      window.removeEventListener('storage', handleStorage);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      unsubscribeAuth?.();
     };
   }, [hydrateFromSupabase]);
 
@@ -418,10 +488,14 @@ export const CmsProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   );
 
   const upsertCategory = useCallback(
-    (category: ServiceCategory) => {
-      const normalized = isValidUuid(category.id)
-        ? category
-        : { ...category, id: generateUuid() };
+    async (category: ServiceCategory): Promise<CmsMutationResult> => {
+      const normalized: ServiceCategory = {
+        ...category,
+        id: isValidUuid(category.id) ? category.id : generateUuid(),
+        display_order: Number(category.display_order) || 1,
+        is_published: Boolean(category.is_published),
+      };
+
       setDb((prev) => {
         const exists = prev.service_categories.some((c) => c.id === category.id);
         return {
@@ -429,50 +503,209 @@ export const CmsProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           service_categories: exists
             ? prev.service_categories.map((c) => (c.id === category.id ? normalized : c))
             : [...prev.service_categories, normalized],
+          sub_services:
+            category.id !== normalized.id
+              ? prev.sub_services.map((s) =>
+                  s.category_id === category.id ? { ...s, category_id: normalized.id } : s
+                )
+              : prev.sub_services,
         };
       });
-      if (isSupabaseConfigured && supabase) {
-        supabase
+
+      if (!isSupabaseConfigured || !supabase) {
+        return { ok: true, synced: false };
+      }
+
+      const fields = {
+        name: normalized.name,
+        slug: normalized.slug,
+        description: normalized.description,
+        icon_name: normalized.icon_name,
+        display_order: normalized.display_order,
+        is_published: normalized.is_published,
+      };
+
+      try {
+        // 1) Try updating existing row by UUID
+        if (isValidUuid(category.id)) {
+          const { data: updated, error: updateErr } = await supabase
+            .from('service_categories')
+            .update(fields)
+            .eq('id', category.id)
+            .select('id');
+
+          if (updateErr) {
+            reportSupabaseResult('service_categories', updateErr);
+            return { ok: false, synced: false, error: updateErr.message };
+          }
+          if (updated && updated.length > 0) {
+            setLastSyncError(null);
+            return { ok: true, synced: true };
+          }
+        }
+
+        // 2) Check if a category with this slug already exists in Supabase
+        const { data: existingBySlug } = await supabase
           .from('service_categories')
-          .upsert(
-            {
-              id: normalized.id,
-              name: normalized.name,
-              slug: normalized.slug,
-              description: normalized.description,
-              icon_name: normalized.icon_name,
-              display_order: normalized.display_order,
-              is_published: normalized.is_published,
-            },
-            { onConflict: 'slug' }
-          )
-          .then(({ error }) => reportSupabaseResult('service_categories', error));
+          .select('id')
+          .eq('slug', normalized.slug)
+          .maybeSingle();
+
+        if (existingBySlug?.id) {
+          const { data: updatedBySlug, error: slugUpdateErr } = await supabase
+            .from('service_categories')
+            .update(fields)
+            .eq('id', existingBySlug.id)
+            .select('id');
+
+          if (slugUpdateErr) {
+            reportSupabaseResult('service_categories', slugUpdateErr);
+            return { ok: false, synced: false, error: slugUpdateErr.message };
+          }
+          if (!updatedBySlug || updatedBySlug.length === 0) {
+            const rlsMsg =
+              'Supabase rejected saving this category. Please sign out and sign back in with your Supabase Auth admin account.';
+            reportSupabaseResult('service_categories', { message: rlsMsg });
+            await hydrateFromSupabase();
+            return { ok: false, synced: false, error: rlsMsg };
+          }
+
+          if (existingBySlug.id !== normalized.id) {
+            setDb((prev) => ({
+              ...prev,
+              service_categories: prev.service_categories.map((c) =>
+                c.id === normalized.id ? { ...c, id: existingBySlug.id } : c
+              ),
+              sub_services: prev.sub_services.map((s) =>
+                s.category_id === normalized.id ? { ...s, category_id: existingBySlug.id } : s
+              ),
+            }));
+          }
+          setLastSyncError(null);
+          return { ok: true, synced: true };
+        }
+
+        // 3) Insert new category row
+        const { data: inserted, error: insertErr } = await supabase
+          .from('service_categories')
+          .insert({ id: normalized.id, ...fields })
+          .select('id');
+
+        if (insertErr) {
+          reportSupabaseResult('service_categories', insertErr);
+          return { ok: false, synced: false, error: insertErr.message };
+        }
+        if (!inserted || inserted.length === 0) {
+          const rlsMsg =
+            'Supabase rejected creating this category. Verify your Supabase Auth login session.';
+          reportSupabaseResult('service_categories', { message: rlsMsg });
+          return { ok: false, synced: false, error: rlsMsg };
+        }
+
+        setLastSyncError(null);
+        return { ok: true, synced: true };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Failed to save category.';
+        reportSupabaseResult('service_categories', { message: msg });
+        return { ok: false, synced: false, error: msg };
       }
     },
-    [reportSupabaseResult]
+    [hydrateFromSupabase, reportSupabaseResult]
   );
 
   const deleteCategory = useCallback(
-    (categoryId: string) => {
+    async (categoryId: string): Promise<CmsMutationResult> => {
+      const target = dbRef.current.service_categories.find((c) => c.id === categoryId);
+
       setDb((prev) => ({
         ...prev,
         service_categories: prev.service_categories.filter((c) => c.id !== categoryId),
         sub_services: prev.sub_services.filter((s) => s.category_id !== categoryId),
       }));
-      if (isSupabaseConfigured && supabase && isValidUuid(categoryId)) {
-        supabase
-          .from('service_categories')
-          .delete()
-          .eq('id', categoryId)
-          .then(({ error }) => reportSupabaseResult('delete service_categories', error));
+
+      if (!isSupabaseConfigured || !supabase) {
+        return { ok: true, synced: false };
+      }
+
+      try {
+        let deletedCount = 0;
+
+        if (isValidUuid(categoryId)) {
+          const { data, error } = await supabase
+            .from('service_categories')
+            .delete()
+            .eq('id', categoryId)
+            .select('id');
+          if (error) {
+            reportSupabaseResult('delete service_categories', error);
+            await hydrateFromSupabase();
+            return { ok: false, synced: false, error: error.message };
+          }
+          deletedCount = data?.length || 0;
+        }
+
+        if (deletedCount === 0 && target?.slug) {
+          const { data, error } = await supabase
+            .from('service_categories')
+            .delete()
+            .eq('slug', target.slug)
+            .select('id');
+          if (error) {
+            reportSupabaseResult('delete service_categories', error);
+            await hydrateFromSupabase();
+            return { ok: false, synced: false, error: error.message };
+          }
+          deletedCount = data?.length || 0;
+        }
+
+        if (deletedCount === 0) {
+          const checkQuery = isValidUuid(categoryId)
+            ? supabase.from('service_categories').select('id').eq('id', categoryId).maybeSingle()
+            : target?.slug
+              ? supabase.from('service_categories').select('id').eq('slug', target.slug).maybeSingle()
+              : null;
+
+          if (checkQuery) {
+            const { data: stillExists } = await checkQuery;
+            if (stillExists?.id) {
+              const rlsMsg =
+                'Supabase blocked deleting this category because your admin Supabase Auth session is inactive. Sign out and sign back in.';
+              reportSupabaseResult('delete service_categories', { message: rlsMsg });
+              await hydrateFromSupabase();
+              return { ok: false, synced: false, error: rlsMsg };
+            }
+          }
+        }
+
+        setLastSyncError(null);
+        return { ok: true, synced: true };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Failed to delete category.';
+        reportSupabaseResult('delete service_categories', { message: msg });
+        await hydrateFromSupabase();
+        return { ok: false, synced: false, error: msg };
       }
     },
-    [reportSupabaseResult]
+    [hydrateFromSupabase, reportSupabaseResult]
   );
 
   const upsertSubService = useCallback(
-    (sub: SubService) => {
-      const normalized = isValidUuid(sub.id) ? sub : { ...sub, id: generateUuid() };
+    async (sub: SubService): Promise<CmsMutationResult> => {
+      const normalized: SubService = {
+        ...sub,
+        id: isValidUuid(sub.id) ? sub.id : generateUuid(),
+        original_price: Number(sub.original_price) || 0,
+        ongoing_price: Number(sub.ongoing_price) || 0,
+        display_order: Number(sub.display_order) || 1,
+        is_published: Boolean(sub.is_published),
+        is_placeholder_price: Boolean(sub.is_placeholder_price),
+        deliverables: Array.isArray(sub.deliverables) ? sub.deliverables : [],
+      };
+
+      const localCategory = dbRef.current.service_categories.find(
+        (c) => c.id === normalized.category_id
+      );
+
       setDb((prev) => {
         const exists = prev.sub_services.some((s) => s.id === sub.id);
         return {
@@ -482,49 +715,223 @@ export const CmsProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             : [...prev.sub_services, normalized],
         };
       });
-      if (isSupabaseConfigured && supabase && isValidUuid(normalized.category_id)) {
-        supabase
+
+      if (!isSupabaseConfigured || !supabase) {
+        return { ok: true, synced: false };
+      }
+
+      try {
+        // Upload inline data URL image to Supabase Storage if present
+        let finalImageUrl = normalized.image_url;
+        if (finalImageUrl.startsWith('data:image/')) {
+          const uploaded = await uploadDataUrlToSupabaseStorage(finalImageUrl, 'services');
+          if (uploaded) {
+            finalImageUrl = uploaded;
+            setDb((prev) => ({
+              ...prev,
+              sub_services: prev.sub_services.map((s) =>
+                s.id === normalized.id ? { ...s, image_url: finalImageUrl } : s
+              ),
+            }));
+          }
+        }
+
+        // Resolve valid Supabase UUID for category_id (handles legacy seed IDs like 'cat-cac')
+        let resolvedCategoryId = normalized.category_id;
+        if (!isValidUuid(resolvedCategoryId) && localCategory?.slug) {
+          const { data: remoteCat } = await supabase
+            .from('service_categories')
+            .select('id')
+            .eq('slug', localCategory.slug)
+            .maybeSingle();
+          if (remoteCat?.id) {
+            resolvedCategoryId = remoteCat.id;
+          }
+        }
+
+        if (!isValidUuid(resolvedCategoryId)) {
+          const msg =
+            'Could not match this service category in Supabase. Click "Sync Local to Supabase" first.';
+          reportSupabaseResult('sub_services', { message: msg });
+          return { ok: false, synced: false, error: msg };
+        }
+
+        const updateFields = {
+          category_id: resolvedCategoryId,
+          title: normalized.title,
+          slug: normalized.slug,
+          short_description: normalized.short_description,
+          deliverables: normalized.deliverables,
+          original_price: normalized.original_price,
+          ongoing_price: normalized.ongoing_price,
+          promo_label: normalized.promo_label,
+          is_placeholder_price: normalized.is_placeholder_price,
+          turnaround_time: normalized.turnaround_time,
+          image_url: finalImageUrl,
+          is_published: normalized.is_published,
+          display_order: normalized.display_order,
+        };
+
+        // 1) If editing an existing UUID row, update by primary key `id` first
+        if (isValidUuid(sub.id)) {
+          const { data: updated, error: updateErr } = await supabase
+            .from('sub_services')
+            .update(updateFields)
+            .eq('id', sub.id)
+            .select('id');
+
+          if (updateErr) {
+            reportSupabaseResult('sub_services', updateErr);
+            return { ok: false, synced: false, error: updateErr.message };
+          }
+          if (updated && updated.length > 0) {
+            setLastSyncError(null);
+            return { ok: true, synced: true };
+          }
+        }
+
+        // 2) Check if a row with the same slug already exists in Supabase
+        const { data: existingBySlug } = await supabase
           .from('sub_services')
-          .upsert(
-            {
-              id: normalized.id,
-              category_id: normalized.category_id,
-              title: normalized.title,
-              slug: normalized.slug,
-              short_description: normalized.short_description,
-              deliverables: normalized.deliverables,
-              original_price: normalized.original_price,
-              ongoing_price: normalized.ongoing_price,
-              promo_label: normalized.promo_label,
-              is_placeholder_price: normalized.is_placeholder_price,
-              turnaround_time: normalized.turnaround_time,
-              image_url: normalized.image_url,
-              is_published: normalized.is_published,
-              display_order: normalized.display_order,
-            },
-            { onConflict: 'slug' }
-          )
-          .then(({ error }) => reportSupabaseResult('sub_services', error));
+          .select('id')
+          .eq('slug', normalized.slug)
+          .maybeSingle();
+
+        if (existingBySlug?.id) {
+          const { data: updatedBySlug, error: slugErr } = await supabase
+            .from('sub_services')
+            .update(updateFields)
+            .eq('id', existingBySlug.id)
+            .select('id');
+
+          if (slugErr) {
+            reportSupabaseResult('sub_services', slugErr);
+            return { ok: false, synced: false, error: slugErr.message };
+          }
+
+          if (!updatedBySlug || updatedBySlug.length === 0) {
+            const rlsMsg =
+              'Supabase blocked updating this service price. Your Supabase Auth session is inactive or lacks service edit permission — sign out and sign back in.';
+            reportSupabaseResult('sub_services', { message: rlsMsg });
+            await hydrateFromSupabase();
+            return { ok: false, synced: false, error: rlsMsg };
+          }
+
+          setDb((prev) => ({
+            ...prev,
+            sub_services: prev.sub_services.map((s) =>
+              s.id === normalized.id
+                ? { ...s, id: existingBySlug.id, category_id: resolvedCategoryId, image_url: finalImageUrl }
+                : s
+            ),
+          }));
+          setLastSyncError(null);
+          return { ok: true, synced: true };
+        }
+
+        // 3) Insert new sub-service row
+        const { data: inserted, error: insertErr } = await supabase
+          .from('sub_services')
+          .insert({ id: normalized.id, ...updateFields })
+          .select('id');
+
+        if (insertErr) {
+          reportSupabaseResult('sub_services', insertErr);
+          return { ok: false, synced: false, error: insertErr.message };
+        }
+        if (!inserted || inserted.length === 0) {
+          const rlsMsg =
+            'Supabase blocked creating this service. Please verify your Supabase Auth session.';
+          reportSupabaseResult('sub_services', { message: rlsMsg });
+          return { ok: false, synced: false, error: rlsMsg };
+        }
+
+        setLastSyncError(null);
+        return { ok: true, synced: true };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Failed to save service pricing.';
+        reportSupabaseResult('sub_services', { message: msg });
+        return { ok: false, synced: false, error: msg };
       }
     },
-    [reportSupabaseResult]
+    [hydrateFromSupabase, reportSupabaseResult]
   );
 
   const deleteSubService = useCallback(
-    (subId: string) => {
+    async (subId: string): Promise<CmsMutationResult> => {
+      const target = dbRef.current.sub_services.find((s) => s.id === subId);
+
       setDb((prev) => ({
         ...prev,
         sub_services: prev.sub_services.filter((s) => s.id !== subId),
       }));
-      if (isSupabaseConfigured && supabase && isValidUuid(subId)) {
-        supabase
-          .from('sub_services')
-          .delete()
-          .eq('id', subId)
-          .then(({ error }) => reportSupabaseResult('delete sub_services', error));
+
+      if (!isSupabaseConfigured || !supabase) {
+        return { ok: true, synced: false };
+      }
+
+      try {
+        let deletedCount = 0;
+
+        if (isValidUuid(subId)) {
+          const { data, error } = await supabase
+            .from('sub_services')
+            .delete()
+            .eq('id', subId)
+            .select('id');
+
+          if (error) {
+            reportSupabaseResult('delete sub_services', error);
+            await hydrateFromSupabase();
+            return { ok: false, synced: false, error: error.message };
+          }
+          deletedCount = data?.length || 0;
+        }
+
+        if (deletedCount === 0 && target?.slug) {
+          const { data, error } = await supabase
+            .from('sub_services')
+            .delete()
+            .eq('slug', target.slug)
+            .select('id');
+
+          if (error) {
+            reportSupabaseResult('delete sub_services', error);
+            await hydrateFromSupabase();
+            return { ok: false, synced: false, error: error.message };
+          }
+          deletedCount = data?.length || 0;
+        }
+
+        if (deletedCount === 0) {
+          const checkQuery = isValidUuid(subId)
+            ? supabase.from('sub_services').select('id').eq('id', subId).maybeSingle()
+            : target?.slug
+              ? supabase.from('sub_services').select('id').eq('slug', target.slug).maybeSingle()
+              : null;
+
+          if (checkQuery) {
+            const { data: stillExists } = await checkQuery;
+            if (stillExists?.id) {
+              const rlsMsg =
+                'Supabase blocked deleting this service because your Supabase Auth session is inactive. Sign out and sign back in.';
+              reportSupabaseResult('delete sub_services', { message: rlsMsg });
+              await hydrateFromSupabase();
+              return { ok: false, synced: false, error: rlsMsg };
+            }
+          }
+        }
+
+        setLastSyncError(null);
+        return { ok: true, synced: true };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Failed to delete service.';
+        reportSupabaseResult('delete sub_services', { message: msg });
+        await hydrateFromSupabase();
+        return { ok: false, synced: false, error: msg };
       }
     },
-    [reportSupabaseResult]
+    [hydrateFromSupabase, reportSupabaseResult]
   );
 
   const upsertPortfolioProject = useCallback(
@@ -975,6 +1382,83 @@ export const CmsProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
       }
 
+      // Sync service_categories (mapping legacy IDs -> real Supabase UUIDs by slug)
+      const categoryIdMap = new Map<string, string>();
+      if (db.service_categories.length > 0) {
+        const { data: existingCats } = await supabase
+          .from('service_categories')
+          .select('id, slug');
+        const remoteCatBySlug = new Map(
+          ((existingCats as { id: string; slug: string }[] | null) || []).map((c) => [c.slug, c.id])
+        );
+
+        for (const cat of db.service_categories) {
+          const targetId =
+            remoteCatBySlug.get(cat.slug) || (isValidUuid(cat.id) ? cat.id : generateUuid());
+          categoryIdMap.set(cat.id, targetId);
+          const fields = {
+            name: cat.name,
+            slug: cat.slug,
+            description: cat.description,
+            icon_name: cat.icon_name,
+            display_order: Number(cat.display_order) || 1,
+            is_published: Boolean(cat.is_published),
+          };
+          const catRes = remoteCatBySlug.has(cat.slug)
+            ? await supabase.from('service_categories').update(fields).eq('id', targetId)
+            : await supabase.from('service_categories').insert({ id: targetId, ...fields });
+          if (catRes.error) {
+            reportSupabaseResult('service_categories sync', catRes.error);
+            return { ok: false, message: catRes.error.message };
+          }
+        }
+      }
+
+      // Sync sub_services (preserving prices, uploading inline images, mapping category UUIDs)
+      if (db.sub_services.length > 0) {
+        const { data: existingSubs } = await supabase.from('sub_services').select('id, slug');
+        const remoteSubBySlug = new Map(
+          ((existingSubs as { id: string; slug: string }[] | null) || []).map((s) => [s.slug, s.id])
+        );
+
+        for (const sub of db.sub_services) {
+          const mappedCategoryId = categoryIdMap.get(sub.category_id) || sub.category_id;
+          if (!isValidUuid(mappedCategoryId)) continue;
+
+          let imgUrl = sub.image_url;
+          if (imgUrl.startsWith('data:image/')) {
+            const uploaded = await uploadDataUrlToSupabaseStorage(imgUrl, 'services');
+            if (uploaded) imgUrl = uploaded;
+          }
+
+          const targetId =
+            remoteSubBySlug.get(sub.slug) || (isValidUuid(sub.id) ? sub.id : generateUuid());
+          const fields = {
+            category_id: mappedCategoryId,
+            title: sub.title,
+            slug: sub.slug,
+            short_description: sub.short_description,
+            deliverables: Array.isArray(sub.deliverables) ? sub.deliverables : [],
+            original_price: Number(sub.original_price) || 0,
+            ongoing_price: Number(sub.ongoing_price) || 0,
+            promo_label: sub.promo_label,
+            is_placeholder_price: Boolean(sub.is_placeholder_price),
+            turnaround_time: sub.turnaround_time,
+            image_url: imgUrl,
+            is_published: Boolean(sub.is_published),
+            display_order: Number(sub.display_order) || 1,
+          };
+
+          const subRes = remoteSubBySlug.has(sub.slug)
+            ? await supabase.from('sub_services').update(fields).eq('id', targetId)
+            : await supabase.from('sub_services').insert({ id: targetId, ...fields });
+          if (subRes.error) {
+            reportSupabaseResult('sub_services sync', subRes.error);
+            return { ok: false, message: subRes.error.message };
+          }
+        }
+      }
+
       let normalizedPortfolio: PortfolioProject[] = [];
       if (db.portfolio_projects.length > 0) {
         normalizedPortfolio = await Promise.all(
@@ -1034,7 +1518,7 @@ export const CmsProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       setLastSyncError(null);
       await hydrateFromSupabase();
-      return { ok: true, message: 'All local CMS records & uploaded images synced to Supabase.' };
+      return { ok: true, message: 'All local CMS records, service pricing & images synced to Supabase.' };
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unexpected sync error';
       return { ok: false, message: msg };
@@ -1058,6 +1542,7 @@ export const CmsProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       supabaseAuthEmail,
       lastSyncError,
       syncLocalToSupabase,
+      refreshFromSupabase,
       inquiryModal,
       openInquiryModal,
       closeInquiryModal,
@@ -1091,6 +1576,7 @@ export const CmsProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       supabaseAuthEmail,
       lastSyncError,
       syncLocalToSupabase,
+      refreshFromSupabase,
       inquiryModal,
       openInquiryModal,
       closeInquiryModal,

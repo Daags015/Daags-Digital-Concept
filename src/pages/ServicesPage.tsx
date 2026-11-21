@@ -4,7 +4,6 @@ import { Search } from 'lucide-react';
 import { useCms } from '@/src/context/CmsContext';
 import { ServiceCard } from '@/src/components/ServiceCard';
 import { ServiceDetailModal } from '@/src/components/ServiceDetailModal';
-import { SubService } from '@/src/types/cms';
 
 export const ServicesPage: React.FC = () => {
   const { slug } = useParams<{ slug?: string }>();
@@ -13,7 +12,12 @@ export const ServicesPage: React.FC = () => {
 
   const header = getSection('services_header');
   const [searchQuery, setSearchQuery] = useState('');
-  const [selectedService, setSelectedService] = useState<SubService | null>(null);
+  const [selectedServiceId, setSelectedServiceId] = useState<string | null>(null);
+
+  const selectedService = useMemo(
+    () => db.sub_services.find((s) => s.id === selectedServiceId && s.is_published) || null,
+    [db.sub_services, selectedServiceId]
+  );
 
   const publishedCategories = useMemo(
     () =>
@@ -156,7 +160,7 @@ export const ServicesPage: React.FC = () => {
                     key={service.id}
                     service={service}
                     category={cat}
-                    onInspect={(s) => setSelectedService(s)}
+                    onInspect={(s) => setSelectedServiceId(s.id)}
                   />
                 );
               })}
@@ -172,7 +176,7 @@ export const ServicesPage: React.FC = () => {
             ? publishedCategories.find((c) => c.id === selectedService.category_id)
             : undefined
         }
-        onClose={() => setSelectedService(null)}
+        onClose={() => setSelectedServiceId(null)}
       />
     </div>
   );

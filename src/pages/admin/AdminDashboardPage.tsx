@@ -319,6 +319,25 @@ export const AdminDashboardPage: React.FC = () => {
         </header>
 
         <main className="flex-1 p-4 sm:p-6 lg:p-8 max-w-6xl w-full mx-auto space-y-5">
+          {!isSupabaseReady && (
+            <div
+              role="status"
+              className="rounded-xl border border-amber-300 bg-amber-50 p-4 flex items-start gap-2.5 text-xs text-amber-950"
+            >
+              <Database className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+              <div className="space-y-0.5">
+                <p className="font-bold">
+                  Supabase Database Not Connected on This Deployment (Local Browser Storage Only)
+                </p>
+                <p className="text-amber-900">
+                  Price updates and deleted services will only appear on this browser until{' '}
+                  <code className="font-mono font-semibold">VITE_SUPABASE_URL</code> and{' '}
+                  <code className="font-mono font-semibold">VITE_SUPABASE_ANON_KEY</code> are added
+                  in Vercel Project Settings → Environment Variables and redeployed.
+                </p>
+              </div>
+            </div>
+          )}
           {isSupabaseReady && (!supabaseAuthEmail || lastSyncError) && (
             <div
               role="status"
@@ -335,7 +354,7 @@ export const AdminDashboardPage: React.FC = () => {
                   <p className="text-amber-900">
                     {lastSyncError
                       ? lastSyncError
-                      : 'To save new portfolio projects, logos, and edits to Supabase under Row Level Security, create your admin account in Supabase Dashboard → Authentication → Users (with Auto Confirm) and sign back in.'}
+                      : 'To save service price edits, deletions, portfolio projects, and logos to Supabase, sign out and sign back in with your Supabase Auth admin email & password.'}
                   </p>
                 </div>
               </div>
